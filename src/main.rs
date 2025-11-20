@@ -2,7 +2,7 @@ use axum::{routing::get, Router};
 use tokio::sync::mpsc;
 use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
-
+use chrono;
 
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -11,16 +11,24 @@ struct analyticsParams {
     url: Option<String>, 
     referrer: Option<String>, 
 }
+
+#[derive(Debug, Clone)]
 struct eventPacket {
-    event_type: String,
-    event_data: String,
+    params: analyticsParams,
+    timestamp: chrono::DateTime<chrono::Utc>,
 
 }
 
 #[tokio::main]
 async fn main() {
-    println!("Hello, world!");
+    
+    let app = Router::new().route("/event", get(root));
+
 
     let address = SocketAddr::from(([0,0,0,0], 3000));
+    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+    axum::serve(listener, router).await.unwrap();
 
 }
+
+async fn event_handler() // axum automatically fills the parameters
