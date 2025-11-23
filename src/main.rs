@@ -42,8 +42,15 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    
-    let app = Router::new().route("/event", get(root));
+    tracing_subscriber::fmt::init();
+
+    // This is our queue
+    let (tx, mut rx) = mpsc::channel::<eventPacket>(10_000);
+
+    let state = AppState { sender: tx };
+    let app = Router::new().route("/event", get(event_handler))
+    .layer(SecureClientIpSource::ConnectInfo.into_extension())
+    .with_state(state);
 
 
     let address = SocketAddr::from(([0,0,0,0], 3000));
@@ -60,4 +67,31 @@ async fn event_handler(
     headers: HeaderMap,
     SecureClientIp(ip): SecureClientIp,
 
-) {} // axum automatically fills the parameters
+) -> StatusCode {
+
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Construct the event payload
+    let event = eventPacket {
+        params,
+        timestamp: chrono::Utc::now(),
+    };
+
+    // Send to the background worker
+    // try_send is non-blocking. If the channel is full, it will fail immediately 
+    // (preventing the server from hanging under massive load).
+    match state.sender.try_send(event) {
+        Ok(_) => {
+            // Success: Return 200 OK immediately
+            StatusCode::OK 
+        }
+        Err(_e) => {
+            // Queue is full: Return 503 or just drop it to save the server
+            tracing::warn!("Queue full, dropping analytics event");
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    }
+} // axum automatically fills the parameters
