@@ -57,7 +57,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(address).await.unwrap();
 
     // we need to make a channel to send events toe 
-    axum::serve(listener, router).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
 
 }
 
