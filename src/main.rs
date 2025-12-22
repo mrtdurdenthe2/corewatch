@@ -44,6 +44,13 @@ struct AppState {
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    dotenvy::from_filename(".env.local").ok();
+    dotenvy::dotenv().ok();
+
+    let deployment_url = env::var("CONVEX_URL").unwrap();
+
+    let mut client = ConvexClient::new(&deployment_url).await.unwrap();
+
     // This is our queue
     let (tx, mut rx) = mpsc::channel::<eventPacket>(10_000);
 
