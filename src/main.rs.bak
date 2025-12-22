@@ -45,7 +45,7 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     // This is our queue
-    let (tx, mut rx) = mpsc::channel::<eventPacket>(10_000);
+    let (tx, rx) = mpsc::channel::<eventPacket>(10_000);
 
     let state = AppState { sender: tx };
     let app = Router::new().route("/event", get(event_handler))
@@ -56,20 +56,8 @@ async fn main() {
     let address = SocketAddr::from(([0,0,0,0], 3000));
     let listener = tokio::net::TcpListener::bind(address).await.unwrap();
 
-    tokio::spawn(async move {
-        println!("Background worker started...");
-        
-        // Ideally, you would batch these (e.g., wait for 100 items or 1 second)
-        // For simplicity, we process them one by one here.
-        while let Some(event) = rx.recv().await {
-            // SIMULATE DB WRITE
-            // In production, use an async client (like sqlx or clickhouse-rs) here
-            tracing::info!("PERSISTING EVENT: {:?}", event); 
-        }
-    });
-
     // we need to make a channel to send events toe 
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
 
 }
 
@@ -80,6 +68,7 @@ async fn event_handler(
     SecureClientIp(ip): SecureClientIp,
 
 ) -> StatusCode {
+    tracing_subscriber::fmt::init();
 
     let user_agent = headers
         .get(axum::http::header::USER_AGENT)
