@@ -1,9 +1,11 @@
 use std::time::Duration;
+use std::env;
 
 #[tokio::main]
 async fn main() {
     let client = reqwest::Client::new();
-    let base_url = "http://127.0.0.1:3000/event";
+    let base_url = "http://127.0.0.1:6767/event";
+    let secret = env::var("COREWATCH_INGEST_SECRET").unwrap_or_default();
 
     let events = ["click", "view", "scroll", "hover", "submit"];
     let mut counter = 0;
@@ -21,7 +23,11 @@ async fn main() {
             counter
         );
 
-        match client.get(&url).send().await {
+        let req = client
+            .get(&url)
+            .header("authorization", format!("Bearer {}", secret));
+
+        match req.send().await {
             Ok(response) => {
                 println!(
                     "[{}] Sent event '{}' -> Status: {}",
@@ -36,7 +42,7 @@ async fn main() {
         }
 
         counter += 1;
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 

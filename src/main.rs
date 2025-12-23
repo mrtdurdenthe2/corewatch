@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Query, Request},
+    extract::Query,
     http::{HeaderMap, StatusCode},
     routing::get,
     Router,
@@ -31,6 +31,31 @@ struct eventPacket {
 #[derive(Clone)]
 struct AppState {
     sender: mpsc::Sender<eventPacket>,
+    ingest_secret: String,
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+fn is_authorized(headers: &HeaderMap, secret: &str) -> bool {
+    let Some(auth) = headers.get(axum::http::header::AUTHORIZATION) else {
+        return false;
+    };
+    let Ok(auth_str) = auth.to_str() else {
+        return false;
+    };
+    let Some(token) = auth_str.strip_prefix("Bearer ") else {
+        return false;
+    };
+    constant_time_eq(token.as_bytes(), secret.as_bytes())
 }
 
 
@@ -44,53 +69,66 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
+    if let Err(e) = run().await {
+        eprintln!("Fatal error: {e}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     dotenvy::from_filename(".env.local").ok();
     dotenvy::dotenv().ok();
 
-    let deployment_url = env::var("CONVEX_URL").unwrap();
+    let ingest_secret = env::var("COREWATCH_INGEST_SECRET")
+        .map_err(|_| "COREWATCH_INGEST_SECRET is not set (required for /event auth)")?;
 
-    let mut client = ConvexClient::new(&deployment_url).await.unwrap();
+    let deployment_url = env::var("CONVEX_URL")
+        .map_err(|_| "CONVEX_URL is not set")?;
+
+    let _client = ConvexClient::new(&deployment_url).await?;
 
     // This is our queue
     let (tx, mut rx) = mpsc::channel::<eventPacket>(10_000);
 
-    let state = AppState { sender: tx };
+    let state = AppState { sender: tx, ingest_secret };
     let app = Router::new().route("/event", get(event_handler))
-    .layer(SecureClientIpSource::ConnectInfo.into_extension())
-    .with_state(state);
+        .layer(SecureClientIpSource::ConnectInfo.into_extension())
+        .with_state(state);
 
-
-    let address = SocketAddr::from(([0,0,0,0], 3000));
-    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+    let address = SocketAddr::from(([0,0,0,0], 6767));
+    let listener = tokio::net::TcpListener::bind(address).await?;
 
     tokio::spawn(async move {
         println!("Background worker started...");
-        
+
         // Ideally, you would batch these (e.g., wait for 100 items or 1 second)
         // For simplicity, we process them one by one here.
         while let Some(event) = rx.recv().await {
             // SIMULATE DB WRITE
             // In production, use an async client (like sqlx or clickhouse-rs) here
-            tracing::info!("PERSISTING EVENT: {:?}", event); 
+            tracing::info!("PERSISTING EVENT: {:?}", event);
         }
     });
 
-    // we need to make a channel to send events toe 
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
-
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    Ok(())
 }
 
 async fn event_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     Query(params): Query<analyticsParams>,
     headers: HeaderMap,
-    SecureClientIp(ip): SecureClientIp,
+    SecureClientIp(_ip): SecureClientIp,
 
 ) -> StatusCode {
+    // Shared-secret auth (expects: Authorization: Bearer <COREWATCH_INGEST_SECRET>)
+    if !is_authorized(&headers, &state.ingest_secret) {
+        return StatusCode::UNAUTHORIZED;
+    }
 
-    let user_agent = headers
+    let _user_agent = headers
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
