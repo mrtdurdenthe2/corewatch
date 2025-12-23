@@ -6,12 +6,13 @@ use axum::{
 };
 
 use tokio::sync::mpsc;
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::env;
 use serde::{Deserialize, Serialize};
 use chrono;
 use axum_client_ip::{SecureClientIp, SecureClientIpSource};
-use convex::ConvexClient;
+use convex::{ConvexClient, Value, FunctionResult};
 
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -25,6 +26,8 @@ struct analyticsParams {
 struct eventPacket {
     params: analyticsParams,
     timestamp: chrono::DateTime<chrono::Utc>,
+    user_agent: Option<String>,
+    ip: String,
 
 }
 
@@ -87,7 +90,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let deployment_url = env::var("CONVEX_URL")
         .map_err(|_| "CONVEX_URL is not set")?;
 
-    let _client = ConvexClient::new(&deployment_url).await?;
+    // One Convex client connection shared by the background worker.
+    let convex_client = ConvexClient::new(&deployment_url).await?;
 
     // This is our queue
     let (tx, mut rx) = mpsc::channel::<eventPacket>(10_000);
@@ -105,10 +109,46 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
         // Ideally, you would batch these (e.g., wait for 100 items or 1 second)
         // For simplicity, we process them one by one here.
+        let mut client = convex_client;
         while let Some(event) = rx.recv().await {
-            // SIMULATE DB WRITE
-            // In production, use an async client (like sqlx or clickhouse-rs) here
-            tracing::info!("PERSISTING EVENT: {:?}", event);
+            // Persist to Convex via mutation: "events:addEvent"
+            let mut args: BTreeMap<String, Value> = BTreeMap::new();
+            args.insert("event".to_string(), event.params.event.clone().into());
+            if let Some(url) = event.params.url.clone() {
+                args.insert("url".to_string(), url.into());
+            }
+            if let Some(referrer) = event.params.referrer.clone() {
+                args.insert("referrer".to_string(), referrer.into());
+            }
+            if let Some(ua) = event.user_agent.clone() {
+                args.insert("userAgent".to_string(), ua.into());
+            }
+            args.insert("ip".to_string(), event.ip.clone().into());
+
+            // Basic retry to smooth over transient network hiccups.
+            let mut attempt: u32 = 0;
+            loop {
+                attempt += 1;
+                match client.mutation("events:addEvent", args.clone()).await {
+                    Ok(FunctionResult::Value(v)) => {
+                        tracing::info!("PERSISTED EVENT: {:?}", v);
+                        break;
+                    }
+                    Ok(other) => {
+                        tracing::warn!("Convex returned non-value result: {:?}", other);
+                        break;
+                    }
+                    Err(e) => {
+                        if attempt >= 3 {
+                            tracing::warn!("Failed to persist event after {attempt} attempts: {e}");
+                            break;
+                        }
+                        // 50ms, 150ms
+                        let backoff_ms = 50u64 * (attempt as u64) * (attempt as u64);
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    }
+                }
+            }
         }
     });
 
@@ -128,7 +168,7 @@ async fn event_handler(
         return StatusCode::UNAUTHORIZED;
     }
 
-    let _user_agent = headers
+    let user_agent = headers
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
@@ -137,6 +177,8 @@ async fn event_handler(
     let event = eventPacket {
         params,
         timestamp: chrono::Utc::now(),
+        user_agent,
+        ip: _ip.to_string(),
     };
 
     // Send to the background worker
